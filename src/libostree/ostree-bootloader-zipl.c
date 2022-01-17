@@ -27,6 +27,10 @@
 #define SECURE_EXECUTION_BOOT_IMAGE     "/boot/sd-boot"
 #define SECURE_EXECUTION_HOSTKEY_PATH   "/etc/se-hostkeys/"
 #define SECURE_EXECUTION_HOSTKEY_PREFIX "ibm-z-hostkey"
+#define SECURE_EXECUTION_INITRD_IMAGE   "/tmp/sd-initrd.img"
+#define SECURE_EXECUTION_LUKS_ROOT_KEY  "/etc/luks/root"
+#define SECURE_EXECUTION_LUKS_CONFIG    "/etc/crypttab"
+#define SECURE_EXECUTION_RAMDISK_TOOL   PKGLIBEXECDIR "/s390x-se-luks-gencpio"
 
 /* This is specific to zipl today, but in the future we could also
  * use it for the grub2-mkconfig case.
@@ -148,10 +152,39 @@ _ostree_secure_execution_get_bls_config (OstreeBootloaderZipl *self,
 }
 
 static gboolean
-_ostree_secure_execution_generate_sdboot (gchar *vmlinuz,
-                                          gchar *initramfs,
-                                          gchar *options,
-                                          GPtrArray *keys,
+_ostree_secure_execution_luks_key_exists (void)
+{
+  return (access(SECURE_EXECUTION_LUKS_ROOT_KEY, F_OK) == 0 &&
+          access(SECURE_EXECUTION_LUKS_CONFIG, F_OK) == 0);
+}
+
+static gboolean
+_ostree_secure_execution_enable_luks(const gchar* initramfs, GError **error)
+{
+  const char *const argv[] = {SECURE_EXECUTION_RAMDISK_TOOL, initramfs, SECURE_EXECUTION_INITRD_IMAGE, NULL};
+  g_autofree gchar *out = NULL;
+  g_autofree gchar *err = NULL;
+  int status = 0;
+  if (!g_spawn_sync (NULL, (char**)argv, NULL, G_SPAWN_SEARCH_PATH,
+                     NULL, NULL, &out, &err, &status, error))
+    return glnx_prefix_error(error, "s390x SE: spawning %s", SECURE_EXECUTION_RAMDISK_TOOL);
+
+  if (!g_spawn_check_exit_status (status, error))
+    {
+      g_printerr("s390x SE: `%s` stdout: %s\n", SECURE_EXECUTION_RAMDISK_TOOL, out);
+      g_printerr("s390x SE: `%s` stderr: %s\n", SECURE_EXECUTION_RAMDISK_TOOL, err);
+      return glnx_prefix_error(error, "s390x SE: `%s` failed", SECURE_EXECUTION_RAMDISK_TOOL);
+    }
+
+  sd_journal_print(LOG_INFO, "s390x SE: luks key added to initrd");
+  return TRUE;
+}
+
+static gboolean
+_ostree_secure_execution_generate_sdboot (const gchar *vmlinuz,
+                                          const gchar *initramfs,
+                                          const gchar *options,
+                                          const GPtrArray *keys,
                                           GError **error)
 {
   g_assert (vmlinuz && initramfs && options && keys && keys->len);
@@ -165,12 +198,20 @@ _ostree_secure_execution_generate_sdboot (gchar *vmlinuz,
     return glnx_throw_errno_prefix (error, "s390x SE: creating %s", cmdline);
   glnx_close_fd(&fd);
 
+  const gchar *ramdisk = initramfs;
+  if (_ostree_secure_execution_luks_key_exists ())
+    {
+      if ( !_ostree_secure_execution_enable_luks (initramfs, error))
+        return FALSE;
+      ramdisk = SECURE_EXECUTION_INITRD_IMAGE;
+    }
+
   g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func (g_free);
   g_ptr_array_add (argv, "genprotimg");
   g_ptr_array_add (argv, "-i");
   g_ptr_array_add (argv, vmlinuz);
   g_ptr_array_add (argv, "-r");
-  g_ptr_array_add (argv, initramfs);
+  g_ptr_array_add (argv, ramdisk);
   g_ptr_array_add (argv, "-p");
   g_ptr_array_add (argv, cmdline);
   for (guint i = 0; i < keys->len; ++i)
