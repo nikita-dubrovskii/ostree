@@ -192,11 +192,14 @@ _ostree_secure_execution_generate_sdboot (const gchar *vmlinuz,
   sd_journal_print(LOG_INFO, "s390x SE: initrd: %s", initramfs);
   sd_journal_print(LOG_INFO, "s390x SE: kargs: %s", options);
 
-  g_autofree char *cmdline = g_strdup ("/tmp/sd_boot.parmfile.XXXXXX");
-  glnx_autofd int fd       = g_mkstemp (cmdline);
-  if (glnx_loop_write (fd, options, strlen (options)) < 0)
-    return glnx_throw_errno_prefix (error, "s390x SE: creating %s", cmdline);
-  glnx_close_fd(&fd);
+  g_auto(GLnxTmpfile) tmpf = { 0, };
+  if (!glnx_open_anonymous_tmpfile (O_RDWR | O_CLOEXEC, &tmpf, error))
+    return glnx_prefix_error(error, "s390x SE: opening cmdline file");
+  if (glnx_loop_write (tmpf.fd, options, strlen (options)) < 0)
+    return glnx_throw_errno_prefix (error, "s390x SE: writting cmdline file");
+
+  char cmdline[64];
+  snprintf (cmdline, sizeof (cmdline), "/proc/%d/fd/%d", getpid(), tmpf.fd);
 
   const gchar *ramdisk = initramfs;
   if (_ostree_secure_execution_luks_key_exists ())
