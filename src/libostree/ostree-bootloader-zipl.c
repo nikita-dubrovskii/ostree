@@ -206,7 +206,7 @@ _ostree_secure_execution_generate_sdboot (const gchar *vmlinuz,
       ramdisk = SECURE_EXECUTION_INITRD_IMAGE;
     }
 
-  g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func (g_free);
+  g_autoptr(GPtrArray) argv = g_ptr_array_new ();
   g_ptr_array_add (argv, "genprotimg");
   g_ptr_array_add (argv, "-i");
   g_ptr_array_add (argv, vmlinuz);
