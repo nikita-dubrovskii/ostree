@@ -27,7 +27,6 @@
 #define SECURE_EXECUTION_BOOT_IMAGE     "/boot/sd-boot"
 #define SECURE_EXECUTION_HOSTKEY_PATH   "/etc/se-hostkeys/"
 #define SECURE_EXECUTION_HOSTKEY_PREFIX "ibm-z-hostkey"
-#define SECURE_EXECUTION_INITRD_IMAGE   "/tmp/sd-initrd.img"
 #define SECURE_EXECUTION_LUKS_ROOT_KEY  "/etc/luks/root"
 #define SECURE_EXECUTION_LUKS_CONFIG    "/etc/crypttab"
 #define SECURE_EXECUTION_RAMDISK_TOOL   PKGLIBEXECDIR "/s390x-se-luks-gencpio"
@@ -159,9 +158,11 @@ _ostree_secure_execution_luks_key_exists (void)
 }
 
 static gboolean
-_ostree_secure_execution_enable_luks(const gchar* initramfs, GError **error)
+_ostree_secure_execution_enable_luks(const gchar *oldramfs,
+                                     const gchar *newramfs,
+                                     GError **error)
 {
-  const char *const argv[] = {SECURE_EXECUTION_RAMDISK_TOOL, initramfs, SECURE_EXECUTION_INITRD_IMAGE, NULL};
+  const char *const argv[] = {SECURE_EXECUTION_RAMDISK_TOOL, oldramfs, newramfs, NULL};
   g_autofree gchar *out = NULL;
   g_autofree gchar *err = NULL;
   int status = 0;
@@ -201,12 +202,15 @@ _ostree_secure_execution_generate_sdboot (const gchar *vmlinuz,
   char cmdline[64];
   snprintf (cmdline, sizeof (cmdline), "/proc/%d/fd/%d", getpid(), tmpf.fd);
 
-  const gchar *ramdisk = initramfs;
+  g_autofree gchar *newramdisk = NULL;
+  g_auto(GLnxTmpfile) tmpramfs = { 0, };
   if (_ostree_secure_execution_luks_key_exists ())
     {
-      if ( !_ostree_secure_execution_enable_luks (initramfs, error))
+      if (!glnx_open_anonymous_tmpfile (O_RDWR | O_CLOEXEC, &tmpramfs, error))
+        return glnx_prefix_error(error, "s390x SE: creating new ramdisk");
+      newramdisk = g_strdup_printf ("/proc/%d/fd/%d", getpid(), tmpramfs.fd);
+      if (!_ostree_secure_execution_enable_luks (initramfs, newramdisk, error))
         return FALSE;
-      ramdisk = SECURE_EXECUTION_INITRD_IMAGE;
     }
 
   g_autoptr(GPtrArray) argv = g_ptr_array_new ();
@@ -214,7 +218,7 @@ _ostree_secure_execution_generate_sdboot (const gchar *vmlinuz,
   g_ptr_array_add (argv, "-i");
   g_ptr_array_add (argv, vmlinuz);
   g_ptr_array_add (argv, "-r");
-  g_ptr_array_add (argv, ramdisk);
+  g_ptr_array_add (argv, (newramdisk == NULL) ? initramfs: newramdisk);
   g_ptr_array_add (argv, "-p");
   g_ptr_array_add (argv, cmdline);
   for (guint i = 0; i < keys->len; ++i)
